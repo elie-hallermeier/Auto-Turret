@@ -1,211 +1,102 @@
-# Autonomous Vision Pan-Tilt Tracker (Raspberry Pi 5)
+# Auto-Turret
 
-
+My snacks kept disappearing... so I built an autonomous turret to protect them. It spots a person and follows them around the room, running fully on a Raspberry Pi 5 with no GPU.
 
 https://github.com/user-attachments/assets/3721efa2-5bd6-4499-8468-93d212292350
 
+## The problem
 
+Following a person with a camera sounds simple, but on a Pi it's a budget problem. Face detectors lose the target as soon as someone turns around or walks away, body detectors are too coarse to aim with up close, and running both on every frame on a CPU is too slow to drive servos smoothly.
 
-Real-time face and person tracking on a Raspberry Pi 5, driving a pan-tilt rig with a PCA9685 servo controller. The system uses OpenCV DNN models to detect faces first, then falls back to body detection for robust human following.
+## What I built
 
-This repository contains an **educational and hobby-focused version** of the project that demonstrates:
+A single Python process that reads the camera, detects, steers two servos and streams an annotated video feed to any browser on the network.
 
-- Vision-based tracking
-- Closed-loop servo control
-- A simple web-based viewer on top of a Raspberry Pi
+- Face first, body as fallback, so the rig keeps following when the face is lost
+- 15 to 20 fps on a Pi 5 (4 GB) CPU at 300x225
+- A scan pattern that sweeps the room when the target has been gone for 2 seconds
+- Live MJPEG stream on port 5000 and a small JSON status endpoint
+- Hardware cost under 100 USD
 
-> **Note**  
-> This code does not include any firing, relay, or weapon control logic. It is intended for safe applications such as camera tracking, laser pointers, robotics demos, and human-robot interaction experiments.
+This public version has no firing, relay or trigger logic. It's a tracker for camera, laser pointer and human-robot interaction demos.
 
----
+## Architecture
 
-## Features
+```mermaid
+flowchart LR
+    cam[Picamera2<br/>300x225] --> face[Face detector<br/>SSD-ResNet10]
+    face -->|no face| body[Person detector<br/>MobileNet-SSD]
+    face --> pick[Best box center]
+    body --> pick
+    pick --> ctrl[P controller<br/>with deadband]
+    ctrl --> pca[PCA9685 over I2C]
+    pca --> servos[Pan and tilt servos]
+    pick --> hud[Overlay]
+    hud --> web[Flask MJPEG stream]
+```
 
-- **Real-time tracking** on a Raspberry Pi 5 (4 GB)
-- **Face-priority detection** (SSD-ResNet10) with fallback to person detection (MobileNet-SSD)
-- **Smooth pan-tilt tracking** using a PCA9685 servo driver
-- **Autonomous scanning** pattern when the target is lost
-- **Lightweight Flask server** exposing a live MJPEG stream
-- **Simple status API** (`/api/status`) for external tools
+Everything lives in `src/auto-turret-tracker.py`. The control loop runs inside the frame generator of the video stream, so one loop iteration is one camera frame, one detection, one servo update and one JPEG.
 
----
+| Part | Choice |
+|---|---|
+| Compute | Raspberry Pi 5, 4 GB |
+| Camera | Raspberry Pi Camera via Picamera2 |
+| Servo driver | PCA9685, 16 channel PWM, 50 Hz |
+| Servos | 2x MG90S on channels 0 (pan) and 1 (tilt) |
+| Vision | OpenCV DNN, Caffe models in `models/` |
+| Web | Flask |
 
-## Hardware Overview
+## Design decisions
 
-The project is built around:
+- Two detectors in a cascade. The face model runs on every frame. The person model runs only when there is no recent face, so the common case costs one forward pass.
+- Low resolution on purpose. 300x225 matches the 300x300 network input, and it's what gets the loop to 15 to 20 fps on the CPU.
+- Proportional control with a deadband. The pixel error from frame center is multiplied by a gain of 0.05 and ignored inside 8 px. The deadband keeps cheap MG90S servos from hunting around the center, and there is no integral or derivative term to tune.
+- Hold before scanning. After losing the target the rig waits 2 seconds where it is, then sweeps pan end to end while tilt follows a sine wave, which covers the room without a second motion planner.
+- Angles are clamped to the mechanical limits of the rig (pan 20 to 160, tilt 50 to 130) before every write, so a bad detection can't drive a servo into its end stop.
+- MJPEG over Flask instead of WebRTC. Any phone or laptop can open it with no client code, and the latency is fine on a home network.
 
-- **Raspberry Pi 5 (4 GB)**
-- **PCA9685** 16-channel PWM driver
-- **Two MG90S** servos for pan and tilt
-- **Raspberry Pi Camera** (Picamera2)
+## Setup
 
-> **Approximate total hardware cost:** _under 100 USD_
-
-See [`hardware/bill_of_materials.md`](hardware/bill_of_materials.md) for details.
-
----
-
-## Software Stack
-
-- **Language:** Python 3
-- **Vision:** OpenCV DNN (Caffe models for face, MobileNet-SSD for person)
-- **Control:** Adafruit PCA9685 library for servo control
-- **Camera:** Picamera2
-- **Web server:** Flask (MJPEG streaming)
-- **Platform:** Raspberry Pi OS on Raspberry Pi 5
-
----
-
-## Getting Started
-
-### 1. Clone the repository
+On the Pi, install the camera and OpenCV bindings from apt and make the venv see them. Picamera2 does not install cleanly from pip alone.
 
 ```bash
-git clone https://github.com/<your-username>/pi-vision-pan-tilt-tracker.git
-cd pi-vision-pan-tilt-tracker
+sudo apt install -y python3-picamera2 python3-opencv
 ```
-
-### 2. Install Python dependencies
-
-On the Raspberry Pi:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+git clone https://github.com/elie-hallermeier/Auto-Turret.git
 ```
-
-_You may already have some of these installed via the system. The main Python packages are:_
-
-- `opencv-python`
-- `numpy`
-- `flask`
-- `adafruit-circuitpython-pca9685`
-- `RPi.GPIO`
-- `picamera2` (often installed system-wide; see distribution docs for installation)
-
-### 3. Place the DNN model files
-
-Download the following models and place them in `src/models` or the same folder as `tracker.py`:
-
-- `deploy.prototxt`
-- `res10_300x300_ssd_iter_140000_fp16.caffemodel`
-- `MobileNetSSD_deploy.prototxt`
-- `MobileNetSSD_deploy.caffemodel`
-
-_Update paths in the config section of `tracker.py` if you store them under `src/models`._
-
-### 4. Wire up the hardware
-
-**Basic connections:**
-
-- PCA9685 **SDA/SCL** → Pi SDA/SCL
-- PCA9685 **VCC** → Pi 3.3V, **V+** → servo power supply _(with common ground)_
-- MG90S servos on **channels 0 and 1** (pan and tilt)
-- Raspberry Pi Camera connected and enabled
-
-_See `hardware/wiring_diagram.png` (if available) and the bill of materials for reference._
-
-### 5. Run the tracker
-
-From the project root (with `venv` activated):
 
 ```bash
-cd src
-python tracker.py
+cd Auto-Turret && python3 -m venv --system-site-packages venv && venv/bin/pip install -r requirements.txt
 ```
 
-**If everything is wired correctly:**
+Enable I2C in `sudo raspi-config` (Interface Options).
 
-- The servos should center.
-- The Flask server will start on port **5000**.
+Wiring:
 
-Open the stream in your browser:
+- PCA9685 SDA and SCL to the Pi's SDA and SCL, VCC to 3.3V
+- PCA9685 V+ to a separate 5V servo supply, with ground shared with the Pi
+- Pan servo on channel 0, tilt servo on channel 1
 
+The four model files are already in `models/` and are loaded from there.
+
+## Run
+
+```bash
+venv/bin/python src/auto-turret-tracker.py
 ```
-http://<pi-ip-address>:5000/
-```
 
----
+The servos center, then the stream is at `http://<pi-ip>:5000/`. Status as JSON is at `/api/status`.
 
-## How It Works
+Tuning lives in the config block at the top of the script: servo limits, gains, deadband, scan range, detector thresholds. If tilt moves the wrong way, flip `TILT_DIR`.
 
-**High-level flow:**
+## Next
 
-1. Capture frames from Picamera2 at a modest resolution (e.g., 300x225) for speed.
-2. Run a face detector first (SSD-ResNet10).
-3. If a face is not confidently detected, run MobileNet-SSD for person detection.
-4. Pick the best bounding box and compute its center.
-5. Apply proportional control to adjust pan/tilt angles, keeping the target centered.
-6. When no target is detected for a while, execute a scan pattern across pan/tilt axes.
-7. Draw bounding boxes and overlays, stream the result as MJPEG via Flask.
+- Swap the Caffe models for YuNet to get more frames per second
+- Move the config block to a file
+- A WebSocket API for remote control
 
-See [`docs/how_it_works.md`](docs/how_it_works.md) for a detailed explanation.
+## License
 
----
-
-## Performance Notes
-
-On a Raspberry Pi 5 (4 GB) with modest models/resolution (300x225):
-
-- **~15–20 fps** depending on lighting/scene
-- **Smooth tracking** for normal human movement
-- **Acceptable latency** for demos
-
-_More details and optimization tips: [`docs/performance_notes.md`](docs/performance_notes.md)._
-
----
-
-## Safety and Use Disclaimer
-
-> **Important**  
-> This repository is **for educational and hobby robotics** purposes only.  
-> It is **NOT** designed/reviewed for controlling any harmful, projectile-based, or safety-critical systems.  
-> If you adapt this for more advanced or risky applications, **you are fully responsible for the design, testing, and safety of your system**.
-
-**Suggested safe uses:**
-
-- Camera tracking demos
-- Laser pointer tracking
-- Telepresence experiments
-- Human-robot interaction research and demos
-
----
-
-## Roadmap
-
-Planned or potential future improvements:
-
-- Replace legacy DNN models with lighter/faster alternatives (e.g., YuNet)
-- Add configuration files for gains, tolerances, scan ranges
-- Optional **WebSocket/HTTP API** for remote control/reporting
-- Additional web visualization options
-- Integration with Android app for stream viewing/remote modes
-
----
-
-## About the Author
-
-This project was designed and built by **Elie Hallermeier** as a full-stack robotics experiment:
-
-- Embedded control (PWM, Pi, servos)
-- Computer vision (OpenCV DNN)
-- Real-time tracking
-- Simple web interface for monitoring
-
-_If you use, tweak, or extend this project, I'd love to see it! Feel free to share or open an issue._
-
----
-
-## Requirements
-
-`requirements.txt`:
-
-```text
-opencv-python
-numpy
-flask
-adafruit-circuitpython-pca9685
-RPi.GPIO
-picamera2
-```
+MIT, see [LICENSE](LICENSE).

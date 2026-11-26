@@ -108,6 +108,11 @@ CX, CY = CAM_W // 2, CAM_H // 2  # image center
 
 # ─── Load DNNs ─────────────────────────────────────────────────────────
 
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+FACE_PROTO, FACE_MODEL, PERSON_PROTO, PERSON_MODEL = (
+    str(MODELS_DIR / name) for name in (FACE_PROTO, FACE_MODEL, PERSON_PROTO, PERSON_MODEL)
+)
+
 for f in (FACE_PROTO, FACE_MODEL, PERSON_PROTO, PERSON_MODEL):
     if not Path(f).exists():
         raise FileNotFoundError(f"Missing model file: {f}")
